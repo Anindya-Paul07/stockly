@@ -5,6 +5,11 @@ import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
 import '../data/inventory_store.dart' hide Row;
 import '../services/excel_report.dart';
+import 'widgets/inventory_ledger_card.dart';
+import 'widgets/stock_entry_sheet.dart';
+import 'widgets/inventory_search.dart';
+import 'widgets/movement_history.dart';
+import 'widgets/inventory_dashboard.dart';
 
 typedef InventoryRow = Map<String, Object?>;
 
@@ -20,10 +25,12 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   List<InventoryRow> items = [], movements = [];
+  final searchController = TextEditingController();
   String search = '';
+  InventoryFilter stockFilter = InventoryFilter.all;
   bool loading = true, exporting = false;
   String? loadError;
-  int tab = 0;
+  int tab = 3;
   @override
   void initState() {
     super.initState();
@@ -33,6 +40,93 @@ class _HomeScreenState extends State<HomeScreen> {
   void message(String text) {
     if (mounted)
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  void openInventory(InventoryFilter filter) {
+    FocusScope.of(context).unfocus();
+    searchController.clear();
+
+    setState(() {
+      search = '';
+      stockFilter = filter;
+      tab = 0;
+    });
+  }
+
+  Future<void> chooseStockItem(bool incoming) async {
+    try {
+      final availableItems = await widget.store.items();
+
+      final choices = availableItems.where((item) {
+        return incoming || (item['balance'] as int) > 0;
+      }).toList();
+
+      if (!mounted) return;
+
+      if (choices.isEmpty) {
+        message(
+          incoming
+              ? 'Add an item before loading stock.'
+              : 'No items have stock available to unload.',
+        );
+        return;
+      }
+
+      final selected = await showModalBottomSheet<InventoryRow>(
+        context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
+        useSafeArea: true,
+        builder: (context) {
+          return SafeArea(
+            top: false,
+            child: SizedBox(
+              height: MediaQuery.sizeOf(context).height * 0.65,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+                    child: Text(
+                      incoming
+                          ? 'Select an item to load'
+                          : 'Select an item to unload',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: choices.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final item = choices[index];
+
+                        return ListTile(
+                          title: Text(item['name'] as String),
+                          subtitle: Text(
+                            '${item['sku']} · '
+                            '${item['balance']} ${item['unit']} available',
+                          ),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () => Navigator.pop(context, item),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+
+      if (!mounted || selected == null) return;
+
+      await move(selected, incoming);
+    } catch (e) {
+      message('Could not load items. Please try again.');
+    }
   }
 
   Future<void> refresh() async {
@@ -61,10 +155,64 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> move(InventoryRow item, bool incoming) async {
-    await Navigator.of(context).push(MaterialPageRoute<void>(
-        builder: (_) =>
-            MovementForm(store: widget.store, item: item, incoming: incoming)));
-    await refresh();
+    try {
+      // Read the latest balance before opening the form.
+      final currentItems = await widget.store.items();
+
+      InventoryRow? current;
+
+      for (final candidate in currentItems) {
+        if (candidate['id'] == item['id']) {
+          current = candidate;
+          break;
+        }
+      }
+
+      if (!mounted) return;
+
+      if (current == null) {
+        message('This item is no longer available.');
+        await refresh();
+        return;
+      }
+
+      final selected = current;
+
+      final saved = await showModalBottomSheet<bool>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+
+        // Close using the sheet's close button. This prevents accidental
+        // dismissal while a database save is running.
+        isDismissible: false,
+        enableDrag: false,
+
+        builder: (_) => StockEntrySheet(
+          store: widget.store,
+          itemId: selected['id'] as int,
+          name: selected['name'] as String,
+          sku: selected['sku'] as String,
+          unit: selected['unit'] as String,
+          available: selected['balance'] as int,
+          incoming: incoming,
+        ),
+      );
+
+      if (!mounted) return;
+
+      await refresh();
+
+      if (saved == true) {
+        message(
+          incoming
+              ? 'Stock loaded successfully.'
+              : 'Stock unloaded successfully.',
+        );
+      }
+    } catch (e) {
+      message('Could not open stock entry: $e');
+    }
   }
 
   Future<void> archive(InventoryRow item) async {
@@ -120,13 +268,134 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> showItemHistory(InventoryRow item) async {
+    try {
+      final records = await widget.store.history(
+        itemId: item['id'] as int,
+      );
+
+      if (!mounted) return;
+
+      await showModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
+        builder: (sheetContext) {
+          final theme = Theme.of(sheetContext);
+          final colors = theme.colorScheme;
+
+          return SafeArea(
+            child: SizedBox(
+              height: MediaQuery.sizeOf(sheetContext).height * 0.7,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          item['name'] as String,
+                          style: theme.textTheme.titleLarge,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Stock movement ledger · ${item['sku']}',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: records.isEmpty
+                        ? const Center(
+                            child: Text('No stock movements yet.'),
+                          )
+                        : ListView.separated(
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 8,
+                            ),
+                            itemCount: records.length,
+                            separatorBuilder: (_, __) =>
+                                const Divider(height: 1),
+                            itemBuilder: (_, index) {
+                              final record = records[index];
+                              final quantity = record['quantity'] as int;
+                              final incoming = quantity > 0;
+                              final note = record['note'] as String;
+
+                              return ListTile(
+                                isThreeLine: note.isNotEmpty,
+                                leading: Icon(
+                                  incoming
+                                      ? Icons.south_west
+                                      : Icons.north_east,
+                                  color: incoming
+                                      ? colors.primary
+                                      : colors.onSurfaceVariant,
+                                ),
+                                title: Text(
+                                  incoming ? 'Stock loaded' : 'Stock unloaded',
+                                ),
+                                subtitle: Text(
+                                  '${stamp(record['occurred_at'])}'
+                                  '${note.isEmpty ? '' : '\n$note'}',
+                                ),
+                                trailing: Text(
+                                  '${incoming ? '+' : ''}$quantity'
+                                  '\n${record['unit']}',
+                                  textAlign: TextAlign.end,
+                                  style: theme.textTheme.titleSmall?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    } catch (e) {
+      message('Could not load item history: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final visible = items
-        .where((r) => '${r['name']} ${r['sku']} ${r['category']}'
-            .toLowerCase()
-            .contains(search.toLowerCase()))
-        .toList();
+    final query = search.trim().toLowerCase();
+
+// Every word must match somewhere in the item's searchable details.
+    final terms = query.split(RegExp(r'\s+')).where((term) => term.isNotEmpty);
+
+    final visible = items.where((item) {
+      final searchable =
+          '${item['name']} ${item['sku']} ${item['category']}'.toLowerCase();
+
+      final matchesSearch = terms.every(searchable.contains);
+
+      final balance = item['balance'] as int;
+      final minimum = item['minimum'] as int;
+
+      final matchesFilter = switch (stockFilter) {
+        InventoryFilter.all => true,
+        InventoryFilter.low => balance > 0 && balance <= minimum,
+        InventoryFilter.empty => balance == 0,
+      };
+
+      return matchesSearch && matchesFilter;
+    }).toList();
     final low = items
         .where((r) => (r['balance'] as int) <= (r['minimum'] as int))
         .length;
@@ -148,20 +417,42 @@ class _HomeScreenState extends State<HomeScreen> {
                 : const Icon(Icons.file_download_outlined))
       ]),
       bottomNavigationBar: NavigationBar(
-          selectedIndex: tab,
-          onDestinationSelected: (v) => setState(() => tab = v),
-          destinations: const [
-            NavigationDestination(
-                icon: Icon(Icons.inventory_2_outlined), label: 'Inventory'),
-            NavigationDestination(icon: Icon(Icons.history), label: 'History'),
-            NavigationDestination(
-                icon: Icon(Icons.table_view), label: 'Reports')
-          ]),
+        selectedIndex: const [3, 0, 1, 2].indexOf(tab),
+        onDestinationSelected: (index) {
+          FocusScope.of(context).unfocus();
+
+          setState(() {
+            tab = const [3, 0, 1, 2][index];
+          });
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.dashboard_outlined),
+            selectedIcon: Icon(Icons.dashboard),
+            label: 'Home',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.inventory_2_outlined),
+            selectedIcon: Icon(Icons.inventory_2),
+            label: 'Inventory',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.history),
+            label: 'History',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.table_view_outlined),
+            selectedIcon: Icon(Icons.table_view),
+            label: 'Reports',
+          ),
+        ],
+      ),
       floatingActionButton: tab == 0
           ? FloatingActionButton.extended(
               onPressed: () => edit(),
               icon: const Icon(Icons.add),
-              label: const Text('Add item'))
+              label: const Text('Add item'),
+            )
           : null,
       body: loading
           ? const Center(child: CircularProgressIndicator())
@@ -171,148 +462,145 @@ class _HomeScreenState extends State<HomeScreen> {
                   Text(loadError!),
                   FilledButton(onPressed: refresh, child: const Text('Retry'))
                 ]))
-              : tab == 2
-                  ? ListView(padding: const EdgeInsets.all(20), children: [
-                      const Text('Excel reports',
-                          style: TextStyle(fontSize: 24)),
-                      const Text(
-                          'Exports all items (including archived items), current balances, low-stock count and the complete stock movement history in three worksheets. Quantities use each item’s own unit.'),
-                      const SizedBox(height: 16),
-                      FilledButton.icon(
-                          onPressed: exporting ? null : export,
-                          icon: const Icon(Icons.download),
-                          label: const Text('Generate and share .xlsx')),
-                      const SizedBox(height: 16),
-                      const Text(
-                          'Reports are saved locally in the app documents folder. Use the share sheet to keep a copy in Files or another app. Excel exports are reports, not restorable database backups. Uninstalling the app can remove its local inventory and reports.')
-                    ])
-                  : tab == 1
-                      ? (movements.isEmpty
-                          ? const Center(child: Text('No stock movements yet.'))
-                          : ListView.builder(
-                              itemCount: movements.length,
-                              itemBuilder: (_, index) {
-                                final m = movements[index];
-                                final q = m['quantity'] as int;
-                                return ListTile(
-                                    leading: Icon(q > 0
-                                        ? Icons.south_west
-                                        : Icons.north_east),
-                                    title: Text(
-                                        '${m['name']} · ${q > 0 ? '+' : ''}$q ${m['unit']}'),
-                                    subtitle: Text(
-                                        '${m['sku']} · ${stamp(m['occurred_at'])}\n${m['note']}'),
-                                    isThreeLine: true);
-                              }))
-                      : Column(children: [
-                          Padding(
-                              padding: const EdgeInsets.all(16),
-                              child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.stretch,
-                                  children: [
-                                    Text(
-                                        '${items.length} items · $low at or below minimum'),
-                                    const SizedBox(height: 12),
-                                    TextField(
-                                        onChanged: (v) =>
-                                            setState(() => search = v),
-                                        decoration: const InputDecoration(
-                                            labelText:
-                                                'Search name, SKU or category',
-                                            prefixIcon: Icon(Icons.search),
-                                            border: OutlineInputBorder()))
-                                  ])),
-                          Expanded(
-                              child: visible.isEmpty
-                                  ? Center(
-                                      child: Text(items.isEmpty
-                                          ? 'Add your first item, then record stock in.'
-                                          : 'No matching items.'))
-                                  : ListView.builder(
-                                      padding:
-                                          const EdgeInsets.only(bottom: 90),
-                                      itemCount: visible.length,
-                                      itemBuilder: (context, index) {
-                                        final i = visible[index];
-                                        final isLow = (i['balance'] as int) <=
-                                            (i['minimum'] as int);
-                                        return Card(
-                                            margin: const EdgeInsets.symmetric(
-                                                horizontal: 16, vertical: 6),
-                                            child: Padding(
-                                                padding:
-                                                    const EdgeInsets.all(12),
-                                                child: Column(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment
-                                                            .start,
-                                                    children: [
-                                                      Row(children: [
-                                                        Expanded(
-                                                            child: Text(
-                                                                '${i['name']}',
-                                                                style: Theme.of(
-                                                                        context)
-                                                                    .textTheme
-                                                                    .titleMedium)),
-                                                        PopupMenuButton<String>(
-                                                            onSelected: (v) {
-                                                              if (v == 'edit') {
-                                                                edit(i);
-                                                              } else {
-                                                                archive(i);
-                                                              }
-                                                            },
-                                                            itemBuilder:
-                                                                (_) => const [
-                                                                      PopupMenuItem(
-                                                                          value:
-                                                                              'edit',
-                                                                          child:
-                                                                              Text('Edit details')),
-                                                                      PopupMenuItem(
-                                                                          value:
-                                                                              'archive',
-                                                                          child:
-                                                                              Text('Archive'))
-                                                                    ])
-                                                      ]),
-                                                      Text(
-                                                          '${i['sku']} · ${i['category']}'),
-                                                      Text(
-                                                          '${i['balance']} ${i['unit']} · Minimum ${i['minimum']}${isLow ? ' · Low stock' : ''}',
-                                                          style: TextStyle(
-                                                              color: isLow
-                                                                  ? Theme.of(
-                                                                          context)
-                                                                      .colorScheme
-                                                                      .error
-                                                                  : null)),
-                                                      Wrap(
-                                                          spacing: 8,
-                                                          children: [
-                                                            TextButton.icon(
-                                                                onPressed: () =>
-                                                                    move(i,
-                                                                        true),
-                                                                icon: const Icon(
-                                                                    Icons.add),
-                                                                label: const Text(
-                                                                    'Stock in')),
-                                                            TextButton.icon(
-                                                                onPressed: () =>
-                                                                    move(i,
-                                                                        false),
-                                                                icon: const Icon(
-                                                                    Icons
-                                                                        .remove),
-                                                                label: const Text(
-                                                                    'Stock out'))
-                                                          ])
-                                                    ])));
-                                      }))
-                        ]),
+              : tab == 3
+                  ? InventoryDashboard(
+                      items: items,
+                      movements: movements,
+                      onViewInventory: () => openInventory(InventoryFilter.all),
+                      onViewLowStock: () => openInventory(InventoryFilter.low),
+                      onViewEmpty: () => openInventory(InventoryFilter.empty),
+                      onLoad: () => chooseStockItem(true),
+                      onUnload: () => chooseStockItem(false),
+                      onAddItem: () => edit(),
+                      onViewHistory: () => setState(() => tab = 1),
+                    )
+                  : tab == 2
+                      ? ListView(padding: const EdgeInsets.all(20), children: [
+                          const Text('Excel reports',
+                              style: TextStyle(fontSize: 24)),
+                          const Text(
+                              'Exports all items (including archived items), current balances, low-stock count and the complete stock movement history in three worksheets. Quantities use each item’s own unit.'),
+                          const SizedBox(height: 16),
+                          FilledButton.icon(
+                              onPressed: exporting ? null : export,
+                              icon: const Icon(Icons.download),
+                              label: const Text('Generate and share .xlsx')),
+                          const SizedBox(height: 16),
+                          const Text(
+                              'Reports are saved locally in the app documents folder. Use the share sheet to keep a copy in Files or another app. Excel exports are reports, not restorable database backups. Uninstalling the app can remove its local inventory and reports.')
+                        ])
+                      : tab == 1
+                          ? MovementHistory(movements: movements)
+                          : Column(children: [
+                              Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                                child: InventorySearch(
+                                  controller: searchController,
+                                  filter: stockFilter,
+                                  resultCount: visible.length,
+                                  onQueryChanged: (value) {
+                                    setState(() => search = value);
+                                  },
+                                  onFilterChanged: (value) {
+                                    setState(() => stockFilter = value);
+                                  },
+                                ),
+                              ),
+                              Expanded(
+                                child: visible.isEmpty
+                                    ? Center(
+                                        child: SingleChildScrollView(
+                                          padding: const EdgeInsets.all(24),
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                items.isEmpty
+                                                    ? Icons.inventory_2_outlined
+                                                    : Icons.search_off,
+                                                size: 44,
+                                                color: Theme.of(context)
+                                                    .colorScheme
+                                                    .onSurfaceVariant,
+                                              ),
+                                              const SizedBox(height: 12),
+                                              Text(
+                                                items.isEmpty
+                                                    ? 'Your ledger is empty'
+                                                    : 'No matching stock entries',
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .titleMedium,
+                                                textAlign: TextAlign.center,
+                                              ),
+                                              const SizedBox(height: 8),
+                                              Text(
+                                                items.isEmpty
+                                                    ? 'Add your first item to start tracking stock.'
+                                                    : 'Try another name, SKU or stock filter.',
+                                                textAlign: TextAlign.center,
+                                              ),
+                                              if (search.isNotEmpty ||
+                                                  stockFilter !=
+                                                      InventoryFilter.all) ...[
+                                                const SizedBox(height: 12),
+                                                TextButton.icon(
+                                                  icon: const Icon(
+                                                      Icons.restart_alt),
+                                                  label: const Text(
+                                                      'Reset search'),
+                                                  onPressed: () {
+                                                    searchController.clear();
+
+                                                    setState(() {
+                                                      search = '';
+                                                      stockFilter =
+                                                          InventoryFilter.all;
+                                                    });
+                                                  },
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                        ),
+                                      )
+                                    : ListView.builder(
+                                        keyboardDismissBehavior:
+                                            ScrollViewKeyboardDismissBehavior
+                                                .onDrag,
+                                        padding:
+                                            const EdgeInsets.only(bottom: 90),
+                                        itemCount: visible.length,
+                                        itemBuilder: (context, index) {
+                                          final item = visible[index];
+
+                                          return Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                              vertical: 8,
+                                            ),
+                                            child: InventoryLedgerCard(
+                                              key: ValueKey(item['id']),
+                                              name: item['name'] as String,
+                                              sku: item['sku'] as String,
+                                              category:
+                                                  item['category'] as String,
+                                              unit: item['unit'] as String,
+                                              balance: item['balance'] as int,
+                                              minimum: item['minimum'] as int,
+                                              onOpen: () =>
+                                                  showItemHistory(item),
+                                              onLoad: () => move(item, true),
+                                              onUnload: () => move(item, false),
+                                              onEdit: () => edit(item),
+                                              onArchive: () => archive(item),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                              ),
+                            ]),
     );
   }
 }
@@ -341,6 +629,7 @@ class _ItemFormState extends State<ItemForm> {
     for (final c in controllers) {
       c.dispose();
     }
+
     super.dispose();
   }
 
@@ -387,13 +676,12 @@ class _ItemFormState extends State<ItemForm> {
                           i == 4 ? TextInputType.number : TextInputType.text,
                       decoration: InputDecoration(
                           labelText: [
-                            'Name',
-                            'SKU / unique code',
-                            'Category (optional)',
-                            'Unit (fixed after creation)',
-                            'Low-stock minimum'
-                          ][i],
-                          border: const OutlineInputBorder()),
+                        'Name',
+                        'SKU / unique code',
+                        'Category (optional)',
+                        'Unit (fixed after creation)',
+                        'Low-stock minimum'
+                      ][i]),
                       validator: (v) => i == 2
                           ? null
                           : i == 4
@@ -472,8 +760,7 @@ class _MovementFormState extends State<MovementForm> {
             TextFormField(
                 controller: quantity,
                 keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                    labelText: 'Quantity', border: OutlineInputBorder()),
+                decoration: const InputDecoration(labelText: 'Quantity'),
                 validator: (v) => (int.tryParse(v ?? '') ?? 0) <= 0
                     ? 'Enter a positive whole number'
                     : null),
@@ -482,8 +769,7 @@ class _MovementFormState extends State<MovementForm> {
                 controller: note,
                 maxLines: 3,
                 decoration: const InputDecoration(
-                    labelText: 'Note / reference (optional)',
-                    border: OutlineInputBorder())),
+                    labelText: 'Note / reference (optional)')),
             if (error != null)
               Text(error!,
                   style: TextStyle(color: Theme.of(context).colorScheme.error)),
