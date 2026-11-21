@@ -5,6 +5,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart';
 import '../data/inventory_store.dart' hide Row;
 import '../services/excel_report.dart';
+import 'warehouse_preview_screen.dart';
 
 typedef InventoryRow = Map<String, Object?>;
 
@@ -137,6 +138,23 @@ class _HomeScreenState extends State<HomeScreen> {
             tooltip: 'Refresh',
             onPressed: refresh,
             icon: const Icon(Icons.refresh)),
+        IconButton(
+          tooltip: 'Warehouse animation preview',
+          icon: const Icon(Icons.local_shipping_outlined),
+          onPressed: () async {
+            await Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => WarehousePreviewScreen(
+                  store: widget.store,
+                ),
+              ),
+            );
+
+            if (!mounted) return;
+
+            await refresh();
+          },
+        ),
         IconButton(
             tooltip: 'Export Excel',
             onPressed: exporting ? null : export,
