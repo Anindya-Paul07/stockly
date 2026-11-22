@@ -5,6 +5,7 @@ import '../data/inventory_store.dart' hide Row;
 import 'widgets/warehouse_entry_dialog.dart';
 
 import 'package:flutter/material.dart';
+import 'warehouse_inside_screen.dart';
 
 enum WarehouseAction { receive, dispatch }
 
@@ -31,7 +32,7 @@ class WarehousePreviewScreen extends StatefulWidget {
 }
 
 class _WarehousePreviewScreenState extends State<WarehousePreviewScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final AnimationController _controller;
 
   WarehousePhase _phase = WarehousePhase.ready;
@@ -44,6 +45,8 @@ class _WarehousePreviewScreenState extends State<WarehousePreviewScreen>
   double _vanPosition = 1.3;
   double _from = 1.3;
   double _to = 0;
+  late final AnimationController _entry;
+  bool _entering = false;
 
   @override
   void initState() {
@@ -53,12 +56,17 @@ class _WarehousePreviewScreenState extends State<WarehousePreviewScreen>
       vsync: this,
       duration: const Duration(milliseconds: 800),
     );
+    _entry = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 550),
+    );
   }
 
   @override
   void dispose() {
     _runId++;
     _controller.dispose();
+    _entry.dispose();
     super.dispose();
   }
 
@@ -96,6 +104,67 @@ class _WarehousePreviewScreenState extends State<WarehousePreviewScreen>
           'The movement stopped. Review the details and retry.',
       };
 
+  Future<void> _enterWarehouse() async {
+    if (_busy || _entering) return;
+
+    setState(() => _entering = true);
+
+    final reduced = MediaQuery.of(context).disableAnimations;
+
+    try {
+      if (!reduced) {
+        await _entry.forward(from: 0).orCancel;
+      }
+
+      if (!mounted) return;
+
+      await Navigator.of(context).push(
+        PageRouteBuilder<void>(
+          transitionDuration:
+              reduced ? Duration.zero : const Duration(milliseconds: 320),
+          reverseTransitionDuration:
+              reduced ? Duration.zero : const Duration(milliseconds: 250),
+          pageBuilder: (_, animation, secondaryAnimation) =>
+              WarehouseInsideScreen(store: widget.store),
+          transitionsBuilder: (
+            context,
+            animation,
+            secondaryAnimation,
+            child,
+          ) {
+            final curved = CurvedAnimation(
+              parent: animation,
+              curve: Curves.easeOutCubic,
+            );
+
+            return FadeTransition(
+              opacity: curved,
+              child: ScaleTransition(
+                scale: Tween<double>(
+                  begin: 0.94,
+                  end: 1,
+                ).animate(curved),
+                child: child,
+              ),
+            );
+          },
+        ),
+      );
+
+      if (!mounted) return;
+
+      if (!reduced) {
+        await _entry.reverse().orCancel;
+      } else {
+        _entry.reset();
+      }
+    } on TickerCanceled {
+      // The exterior was closed during its camera animation.
+    } finally {
+      if (mounted) setState(() => _entering = false);
+    }
+  }
+
   Future<bool> _play(
     WarehousePhase phase,
     int milliseconds,
@@ -124,7 +193,7 @@ class _WarehousePreviewScreenState extends State<WarehousePreviewScreen>
   }
 
   Future<void> _openEntry(WarehouseEntryMode mode) async {
-    if (_busy) return;
+    if (_busy || _entering) return;
 
     final addOnly = mode == WarehouseEntryMode.addItem;
     final action = mode == WarehouseEntryMode.receive
@@ -308,32 +377,16 @@ class _WarehousePreviewScreenState extends State<WarehousePreviewScreen>
                   padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
                   child: Row(
                     children: [
-                      IconButton(
-                        tooltip: 'Back',
-                        onPressed: () => Navigator.maybePop(context),
-                        icon: Icon(
-                          Icons.arrow_back,
-                          color: foreground,
-                        ),
-                      ),
                       const SizedBox(width: 4),
                       Expanded(
                         child: Text(
-                          'STOCKLY / LOADING BAY',
+                          'STOCKLY',
                           style: TextStyle(
                             color: foreground,
                             fontSize: 12,
                             fontWeight: FontWeight.w800,
                             letterSpacing: 1.5,
                           ),
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'Reset animation',
-                        onPressed: _reset,
-                        icon: Icon(
-                          Icons.restart_alt,
-                          color: foreground,
                         ),
                       ),
                     ],
@@ -346,18 +399,80 @@ class _WarehousePreviewScreenState extends State<WarehousePreviewScreen>
                     fit: StackFit.expand,
                     children: [
                       AnimatedBuilder(
-                        animation: _controller,
+                        animation: Listenable.merge([_controller, _entry]),
                         builder: (context, _) {
-                          return CustomPaint(
-                            painter: _FullWarehousePainter(
-                              phase: _phase,
-                              progress: _controller.value,
-                              vanPosition: _currentPosition,
-                              dark: dark,
-                              accent: accent,
-                            ),
+                          return LayoutBuilder(
+                            builder: (context, constraints) {
+                              final scale = constraints.maxWidth / 430;
+                              final height = constraints.maxHeight / scale;
+
+                              // Matches the warehouse coordinates in the exterior painter.
+                              final warehouseY = height * 0.79 - 246;
+
+                              final warehouseBounds = Rect.fromLTWH(
+                                17 * scale,
+                                (warehouseY - 52) * scale,
+                                363 * scale,
+                                210 * scale,
+                              );
+
+                              final camera = Curves.easeInOutCubic.transform(
+                                _entry.value,
+                              );
+
+                              final targetY =
+                                  ((warehouseY + 55) / height * 2 - 1)
+                                      .clamp(-1.0, 1.0)
+                                      .toDouble();
+
+                              return ClipRect(
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTapUp: (details) {
+                                    if (warehouseBounds
+                                        .contains(details.localPosition)) {
+                                      _enterWarehouse();
+                                    }
+                                  },
+                                  child: Transform.scale(
+                                    scale: 1 + camera * 2.2,
+                                    alignment: Alignment(-0.08, targetY),
+                                    child: CustomPaint(
+                                      painter: _FullWarehousePainter(
+                                        phase: _phase,
+                                        progress: _controller.value,
+                                        vanPosition: _currentPosition,
+                                        dark: dark,
+                                        accent: accent,
+                                      ),
+                                      child: const SizedBox.expand(),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
                           );
                         },
+                      ),
+                      Positioned(
+                        left: 70,
+                        right: 24,
+                        bottom: 260,
+                        child: Center(
+                          child: TextButton.icon(
+                            onPressed:
+                                _busy || _entering ? null : _enterWarehouse,
+                            icon: const Icon(Icons.door_front_door_outlined),
+                            label: const Text('ENTER WAREHOUSE'),
+                            style: TextButton.styleFrom(
+                              foregroundColor: foreground,
+                              textStyle: const TextStyle(
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1,
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                       Positioned(
                         top: compact ? 4 : 16,
@@ -468,43 +583,9 @@ class _WarehousePreviewScreenState extends State<WarehousePreviewScreen>
                           ),
                         ),
                       ),
-                      TextButton.icon(
-                        onPressed: error ? null : _showError,
-                        icon: const Icon(Icons.warning_amber_rounded),
-                        label: const Text('Test error'),
-                        style: TextButton.styleFrom(
-                          foregroundColor: foreground,
-                        ),
-                      ),
-                      if (error)
-                        TextButton.icon(
-                          onPressed: _busy
-                              ? null
-                              : () => _openEntry(
-                                    _lastAction == WarehouseAction.receive
-                                        ? WarehouseEntryMode.receive
-                                        : WarehouseEntryMode.dispatch,
-                                  ),
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Retry'),
-                          style: TextButton.styleFrom(
-                            foregroundColor: foreground,
-                          ),
-                        ),
                     ],
                   ),
                 ),
-
-                Text(
-                  'ANIMATION PREVIEW · NO STOCK CHANGES',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: foreground,
-                    fontSize: 9,
-                    letterSpacing: 1.2,
-                  ),
-                ),
-                const SizedBox(height: 8),
               ],
             );
           },
